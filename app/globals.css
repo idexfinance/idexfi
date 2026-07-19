@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Ana Vurgu: orange → Midnight Violet ── */
+  --color-orange-50:  #1A1C3D;
+  --color-orange-100: #2A2D57;
+  --color-orange-200: #363A6E;
+  --color-orange-400: #9B8AFF;
+  --color-orange-500: #7B61FF;
+  --color-orange-600: #6247E0;
+  --color-orange-700: #B4A6FF;
+
+  /* ── Gradient Partneri: amber / yellow ── */
+  --color-amber-50:   #14152B;
+  --color-amber-500:  #A78BFA;
+  --color-amber-600:  #8B5CF6;
+  --color-yellow-50:  #0A0B18;
+
+  /* ── Başarı: green ── */
+  --color-green-100:  #123024;
+  --color-green-200:  #1F4A36;
+  --color-green-500:  #22C55E;
+  --color-green-600:  #34D399;
+
+  /* ── Hata: red ── */
+  --color-red-50:  #2A1216;
+  --color-red-100: #3A1A1F;
+  --color-red-200: #4A222A;
+  --color-red-500: #F87171;
+  --color-red-600: #EF4444;
+
+  /* ── Nötr / Metin: gray ── */
+  --color-gray-100: #1E2038;
+  --color-gray-200: #2A2C4A;
+  --color-gray-400: #6C6E96;
+  --color-gray-500: #8B8DB8;
+  --color-gray-600: #A8AAC9;
+  --color-gray-700: #C4C6E0;
+  --color-gray-800: #DEDFF0;
+  --color-gray-900: #E4E4F5;
+
+  /* ── Yüzeyler ── */
+  --color-surface: #181B34;
+  --color-base:    #0F1023;
+}
+
+:root {
+  --font-inter: 'Inter', system-ui, sans-serif;
+}
+
+/* Page body background */
+body {
+  background-color: #0F1023;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1A1C3D;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #7B61FF;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9B8AFF;
+}
