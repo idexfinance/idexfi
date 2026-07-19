@@ -1,12 +1,62 @@
-import { WalletClient, encodeFunctionData, Address } from 'viem';
+import { WalletClient, encodeFunctionData, concat, Address } from 'viem';
+import { Attribution } from 'ox/erc8021';
 import { RouteInfo, NATIVE_ETH, WETH_ADDRESS } from './contracts';
 import { getDeadline } from './routing';
 import SwapRouter02ABI from './abis/SwapRouter02.json';
 import PancakeSwapV3RouterABI from './abis/PancakeSwapV3Router.json';
 import WETH9ABI from './abis/WETH9.json';
 
+// ── Builder Code Attribution (ERC-8021) ───────────────────────────────────────
+const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
+  codes: ['bc_ri4d72mx'],
+}) as `0x${string}`;
+
 /**
- * Execute swap on the best route with native ETH support
+ * Appends the iDEX builder code suffix to any calldata.
+ * This attributes every transaction to iDEX on Base's onchain analytics.
+ */
+function appendBuilderCode(data: `0x${string}`): `0x${string}` {
+  return concat([data, BUILDER_CODE_SUFFIX]);
+}
+
+/**
+ * Sends a raw transaction with builder code appended to the calldata.
+ * Uses walletClient.sendTransaction instead of writeContract because
+ * writeContract encodes data internally and doesn't allow custom data injection.
+ */
+async function sendWithBuilderCode(
+  walletClient: WalletClient,
+  params: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+    value?: bigint;
+    gas?: bigint;
+  }
+): Promise<`0x${string}`> {
+  // 1. Encode calldata from ABI
+  const data = encodeFunctionData({
+    abi: params.abi,
+    functionName: params.functionName,
+    args: params.args ?? [],
+  });
+
+  // 2. Append builder code suffix
+  const dataWithBuilder = appendBuilderCode(data);
+
+  // 3. Send as raw transaction
+  return walletClient.sendTransaction({
+    to: params.address,
+    data: dataWithBuilder,
+    value: params.value ?? 0n,
+    gas: params.gas,
+  } as any);
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+/**
+ * Execute swap on the best route with native ETH support + builder attribution
  */
 export async function executeSwap(
   walletClient: WalletClient,
@@ -23,19 +73,21 @@ export async function executeSwap(
   if (route.dex === 'weth-wrap') {
     const isWrap = tokenIn.toLowerCase() === NATIVE_ETH.toLowerCase();
     if (isWrap) {
-      return walletClient.writeContract({
+      return sendWithBuilderCode(walletClient, {
         address: WETH_ADDRESS as `0x${string}`,
         abi: WETH9ABI,
         functionName: 'deposit',
         value: amountIn,
-      } as any);
+        gas: 60000n,
+      });
     } else {
-      return walletClient.writeContract({
+      return sendWithBuilderCode(walletClient, {
         address: WETH_ADDRESS as `0x${string}`,
         abi: WETH9ABI,
         functionName: 'withdraw',
         args: [amountIn],
-      } as any);
+        gas: 60000n,
+      });
     }
   }
 
@@ -74,7 +126,7 @@ export async function executeSwap(
         deadline,
         isEthIn,
         isEthOut,
-        true // PancakeSwap V3 requires deadline in the params struct
+        true // PancakeSwap V3 requires deadline inside params struct
       );
 
     default:
@@ -83,8 +135,8 @@ export async function executeSwap(
 }
 
 /**
- * Execute Uniswap V3 / PancakeSwap V3 swap
- * isPancake=true adds deadline inside the params struct (PancakeSwap V3 requirement)
+ * Execute Uniswap V3 / PancakeSwap V3 exactInputSingle with builder attribution.
+ * isPancake=true adds deadline inside the params struct (PancakeSwap V3 requirement).
  */
 async function executeV3Swap(
   walletClient: WalletClient,
@@ -109,7 +161,7 @@ async function executeV3Swap(
       ? { tokenIn: actualTokenIn, tokenOut: actualTokenOut, fee, recipient: overrideRecipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n }
       : { tokenIn: actualTokenIn, tokenOut: actualTokenOut, fee, recipient: overrideRecipient, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n };
 
-  // ETH output: swap to WETH then unwrap
+  // ETH output: swap to WETH then unwrap via multicall
   if (isEthOut) {
     const swapCalldata = encodeFunctionData({
       abi,
@@ -123,21 +175,22 @@ async function executeV3Swap(
       args: [amountOutMinimum, recipient],
     });
 
-    return walletClient.writeContract({
+    // Builder code goes on the outer multicall calldata
+    return sendWithBuilderCode(walletClient, {
       address: routerAddress,
       abi,
       functionName: 'multicall',
       args: [[swapCalldata, unwrapCalldata]],
       value: isEthIn ? amountIn : 0n,
-    } as any);
+    });
   }
 
-  // Normal swap
-  return walletClient.writeContract({
+  // Normal single-hop swap
+  return sendWithBuilderCode(walletClient, {
     address: routerAddress,
     abi,
     functionName: 'exactInputSingle',
     args: [buildParams(recipient)],
     value: isEthIn ? amountIn : 0n,
-  } as any);
+  });
 }

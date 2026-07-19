@@ -2,12 +2,18 @@
 
 import { useState } from 'react';
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
-import { parseUnits, maxUint256 } from 'viem';
+import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
+import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
 import { executeSwap } from '@/lib/swap-executor';
 import { NATIVE_ETH, RouteInfo } from '@/lib/contracts';
 import ERC20ABI from '@/lib/abis/ERC20.json';
 import { saveSwap } from '@/lib/history';
+
+// Builder code suffix for approve transactions
+const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
+  codes: ['bc_ri4d72mx'],
+}) as `0x${string}`;
 
 interface SwapButtonProps {
   tokenIn: string;
@@ -77,12 +83,16 @@ export function SwapButton({
 
         if (allowance < amount) {
           setStep(SwapStep.APPROVING);
-          const approveHash = await walletClient.writeContract({
-            address: tokenIn as `0x${string}`,
+          const approveData = encodeFunctionData({
             abi: ERC20ABI,
             functionName: 'approve',
             args: [bestRoute.routerAddress as `0x${string}`, maxUint256],
           });
+          const approveDataWithBuilder = concat([approveData, BUILDER_CODE_SUFFIX]) as `0x${string}`;
+          const approveHash = await walletClient.sendTransaction({
+            to: tokenIn as `0x${string}`,
+            data: approveDataWithBuilder,
+          } as any);
           await publicClient.waitForTransactionReceipt({ hash: approveHash });
         }
       }
