@@ -11,8 +11,24 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "iDEX - DEX Aggregator on Base",
   description: "Find the best swap rates across Uniswap V3 and PancakeSwap V3 on Base network",
+  metadataBase: new URL('https://idexfi.vercel.app'),
+  openGraph: {
+    title: 'iDEX - DEX Aggregator on Base',
+    description: 'Find the best swap rates across Uniswap V3 and PancakeSwap V3 on Base network',
+    url: 'https://idexfi.vercel.app',
+    siteName: 'iDEX Finance',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'iDEX - DEX Aggregator on Base',
+    description: 'Find the best swap rates across Uniswap V3 and PancakeSwap V3 on Base network',
+  },
   icons: {
     icon: '/favicon.ico',
+  },
+  other: {
+    'base:app_id': '6a5cb44361706cb4b64c8898',
   },
 };
 

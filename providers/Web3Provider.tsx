@@ -23,7 +23,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
         <RainbowKitProvider
           theme={idexTheme}
           locale="en-US"
-          appInfo={{ appName: 'iDEX' }}
+          appInfo={{ appName: 'iDEX', appUrl: 'https://idexfi.vercel.app' }}
         >
           {children}
         </RainbowKitProvider>
