@@ -1,20 +1,29 @@
 'use client';
 
 import { useState } from 'react';
-import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
-import { parseUnits, maxUint256, encodeFunctionData, concat, type Hex } from 'viem';
+import { useAccount, usePublicClient } from 'wagmi';
+import { useWriteContract, useSendTransaction } from 'wagmi';
+import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
 import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
-import { executeSwap } from '@/lib/swap-executor';
-import { NATIVE_ETH, RouteInfo } from '@/lib/contracts';
+import { NATIVE_ETH, WETH_ADDRESS, UNISWAP_V3, PANCAKESWAP_V3, RouteInfo } from '@/lib/contracts';
+import { getDeadline } from '@/lib/routing';
 import ERC20ABI from '@/lib/abis/ERC20.json';
+import SwapRouter02ABI from '@/lib/abis/SwapRouter02.json';
+import PancakeSwapV3RouterABI from '@/lib/abis/PancakeSwapV3Router.json';
+import WETH9ABI from '@/lib/abis/WETH9.json';
 import { saveSwap } from '@/lib/history';
 
-// Builder code suffix — same code used in swap-executor
-const BUILDER_SUFFIX = Attribution.toDataSuffix({
+// ── ERC-8021 Builder Code Attribution ────────────────────────────────────────
+const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
   codes: ['bc_ri4d72mx'],
-}) as Hex;
+}) as `0x${string}`;
 
+function appendBuilderCode(data: `0x${string}`): `0x${string}` {
+  return concat([data, BUILDER_CODE_SUFFIX]);
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
 interface SwapButtonProps {
   tokenIn: string;
   tokenOut: string;
@@ -53,26 +62,65 @@ export function SwapButton({
 }: SwapButtonProps) {
   const { address, isConnected } = useAccount();
   const publicClient = usePublicClient();
-  const { data: walletClient } = useWalletClient();
+
+  // wagmi hooks — sendTransactionAsync is used for all txs (builder code requires raw data)
+  const { writeContractAsync } = useWriteContract();
+  const { sendTransactionAsync } = useSendTransaction();
 
   const [step, setStep]     = useState<SwapStep>(SwapStep.IDLE);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError]   = useState<string | null>(null);
 
-  const isNativeETH = tokenIn.toLowerCase() === NATIVE_ETH.toLowerCase();
+  // ── writeWithBuilderCode ─────────────────────────────────────────────────
+  // Encodes calldata from ABI, appends builder suffix, sends as raw sendTransaction.
+  // writeContractAsync is NOT used for swaps because wagmi re-encodes data
+  // internally and strips any custom appended bytes.
+  async function writeWithBuilderCode(params: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+    value?: bigint;
+    gas?: bigint;
+  }) {
+    // Step 1 — encode calldata from ABI
+    const data = encodeFunctionData({
+      abi: params.abi,
+      functionName: params.functionName,
+      args: params.args ?? [],
+    });
 
+    // Step 2 — append builder code suffix
+    const dataWithBuilder = appendBuilderCode(data);
+
+    // Step 3 — send raw transaction (data is preserved exactly as-is)
+    return sendTransactionAsync({
+      to: params.address,
+      data: dataWithBuilder,
+      value: params.value ?? 0n,
+      gas: params.gas,
+    });
+  }
+
+  // ── Main swap handler ────────────────────────────────────────────────────
   const handleSwap = async () => {
-    if (!publicClient || !walletClient || !address || !bestRoute) return;
+    if (!publicClient || !address || !bestRoute) return;
 
-    // Clear only error/previous state, don't reset to IDLE yet
     setError(null);
     setTxHash(null);
-    setStep(SwapStep.APPROVING); // show first step immediately
+    setStep(SwapStep.APPROVING);
 
     try {
-      const amount = parseUnits(amountIn, decimalsIn);
+      const amount       = parseUnits(amountIn, decimalsIn);
+      const minAmountOut = calculateMinAmountOut(bestRoute.amountOut, slippage);
+      const deadline     = getDeadline(20);
+      const isNativeETH  = tokenIn.toLowerCase() === NATIVE_ETH.toLowerCase();
+      const isEthIn      = isNativeETH;
+      const isEthOut     = tokenOut.toLowerCase() === NATIVE_ETH.toLowerCase();
+      const actualIn     = isEthIn  ? WETH_ADDRESS : tokenIn;
+      const actualOut    = isEthOut ? WETH_ADDRESS : tokenOut;
 
-      // 1. Approve if needed
+      // ── 1. Approve (ERC-20 only, not needed for native ETH or WETH wrap) ──
       if (!isNativeETH && bestRoute.dex !== 'weth-wrap') {
         const allowance = await publicClient.readContract({
           address: tokenIn as `0x${string}`,
@@ -83,46 +131,124 @@ export function SwapButton({
 
         if (allowance < amount) {
           setStep(SwapStep.APPROVING);
-          // Encode approve calldata + append builder suffix, send as raw tx
-          const approveEncoded = encodeFunctionData({
+          // Approve also uses writeWithBuilderCode for attribution
+          const approveHash = await writeWithBuilderCode({
+            address: tokenIn as `0x${string}`,
             abi: ERC20ABI,
             functionName: 'approve',
             args: [bestRoute.routerAddress as `0x${string}`, maxUint256],
           });
-          const approveData = concat([approveEncoded, BUILDER_SUFFIX]) as Hex;
-          const approveHash = await walletClient.sendTransaction({
-            account: address,
-            to: tokenIn as `0x${string}`,
-            data: approveData,
-            chain: null,
-          } as any);
           await publicClient.waitForTransactionReceipt({ hash: approveHash });
         }
       }
 
-      // 2. Execute swap
-      const minAmountOut = calculateMinAmountOut(bestRoute.amountOut, slippage);
+      // ── 2. Swap ───────────────────────────────────────────────────────────
       setStep(SwapStep.SWAPPING);
+      let swapHash: `0x${string}`;
 
-      const swapHash = await executeSwap(
-        walletClient,
-        bestRoute,
-        tokenIn as `0x${string}`,
-        tokenOut as `0x${string}`,
-        amount,
-        minAmountOut,
-        address
-      );
+      // ── WETH wrap / unwrap ──
+      if (bestRoute.dex === 'weth-wrap') {
+        const isWrap = isNativeETH;
+        swapHash = await writeWithBuilderCode(
+          isWrap
+            ? { address: WETH_ADDRESS as `0x${string}`, abi: WETH9ABI, functionName: 'deposit', value: amount, gas: 60000n }
+            : { address: WETH_ADDRESS as `0x${string}`, abi: WETH9ABI, functionName: 'withdraw', args: [amount], gas: 60000n }
+        );
+
+      // ── Uniswap V3 ──
+      } else if (bestRoute.dex === 'uniswap-v3') {
+        const params = {
+          tokenIn: actualIn,
+          tokenOut: actualOut,
+          fee: bestRoute.feeTier!,
+          recipient: isEthOut ? bestRoute.routerAddress as `0x${string}` : address,
+          amountIn: amount,
+          amountOutMinimum: minAmountOut,
+          sqrtPriceLimitX96: 0n,
+        };
+
+        if (isEthOut) {
+          // multicall: exactInputSingle + unwrapWETH9
+          const swapData = encodeFunctionData({
+            abi: SwapRouter02ABI,
+            functionName: 'exactInputSingle',
+            args: [params],
+          });
+          const unwrapData = encodeFunctionData({
+            abi: SwapRouter02ABI,
+            functionName: 'unwrapWETH9',
+            args: [minAmountOut, address],
+          });
+          swapHash = await writeWithBuilderCode({
+            address: UNISWAP_V3.SwapRouter02 as `0x${string}`,
+            abi: SwapRouter02ABI,
+            functionName: 'multicall',
+            args: [[swapData, unwrapData]],
+            value: isEthIn ? amount : 0n,
+          });
+        } else {
+          swapHash = await writeWithBuilderCode({
+            address: UNISWAP_V3.SwapRouter02 as `0x${string}`,
+            abi: SwapRouter02ABI,
+            functionName: 'exactInputSingle',
+            args: [params],
+            value: isEthIn ? amount : 0n,
+          });
+        }
+
+      // ── PancakeSwap V3 ──
+      } else if (bestRoute.dex === 'pancakeswap-v3') {
+        const params = {
+          tokenIn: actualIn,
+          tokenOut: actualOut,
+          fee: bestRoute.feeTier!,
+          recipient: isEthOut ? bestRoute.routerAddress as `0x${string}` : address,
+          deadline,
+          amountIn: amount,
+          amountOutMinimum: minAmountOut,
+          sqrtPriceLimitX96: 0n,
+        };
+
+        if (isEthOut) {
+          const swapData = encodeFunctionData({
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'exactInputSingle',
+            args: [params],
+          });
+          const unwrapData = encodeFunctionData({
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'unwrapWETH9',
+            args: [minAmountOut, address],
+          });
+          swapHash = await writeWithBuilderCode({
+            address: PANCAKESWAP_V3.SwapRouter as `0x${string}`,
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'multicall',
+            args: [[swapData, unwrapData]],
+            value: isEthIn ? amount : 0n,
+          });
+        } else {
+          swapHash = await writeWithBuilderCode({
+            address: PANCAKESWAP_V3.SwapRouter as `0x${string}`,
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'exactInputSingle',
+            args: [params],
+            value: isEthIn ? amount : 0n,
+          });
+        }
+
+      } else {
+        throw new Error(`Unsupported DEX: ${bestRoute.dex}`);
+      }
 
       setTxHash(swapHash);
       setStep(SwapStep.CONFIRMING);
 
-      // 3. Wait for on-chain confirmation
+      // ── 3. Wait for confirmation ──
       await publicClient.waitForTransactionReceipt({ hash: swapHash });
-
       setStep(SwapStep.SUCCESS);
 
-      // Save to localStorage + Supabase
+      // ── 4. Save record ──
       await saveSwap(address, {
         hash: swapHash,
         tokenIn: tokenInSymbol,
@@ -131,13 +257,9 @@ export function SwapButton({
         amountOut,
         timestamp: Date.now(),
       });
-      // Notify history page
       window.dispatchEvent(new Event('idex_swap_completed'));
 
-      // Reset UI after 2.5s — let toast be visible
-      setTimeout(() => {
-        onSwapSuccess?.();
-      }, 2500);
+      setTimeout(() => { onSwapSuccess?.(); }, 2500);
 
     } catch (err) {
       console.error('Swap error:', err);
@@ -147,14 +269,14 @@ export function SwapButton({
   };
 
   const humanizeError = (msg: string): string => {
-    if (msg.includes('insufficient funds'))   return 'Insufficient ETH for gas.';
+    if (msg.includes('insufficient funds'))                          return 'Insufficient ETH for gas.';
     if (msg.includes('User rejected') || msg.includes('User denied')) return 'Transaction rejected in wallet.';
-    if (msg.includes('execution reverted'))   return 'Swap reverted — try increasing slippage.';
-    if (msg.includes('deadline'))             return 'Transaction expired. Please try again.';
+    if (msg.includes('execution reverted'))                          return 'Swap reverted — try increasing slippage.';
+    if (msg.includes('deadline'))                                    return 'Transaction expired. Please try again.';
     return msg.length > 80 ? msg.slice(0, 80) + '…' : msg;
   };
 
-  const isProcessing = step === SwapStep.APPROVING || step === SwapStep.SWAPPING || step === SwapStep.CONFIRMING;
+  const isProcessing = [SwapStep.APPROVING, SwapStep.SWAPPING, SwapStep.CONFIRMING].includes(step);
 
   if (!isConnected) {
     return (
@@ -192,7 +314,7 @@ export function SwapButton({
       {/* ── Fixed toasts ── */}
       <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3 w-80 pointer-events-none">
 
-        {/* Transaction in progress */}
+        {/* In progress */}
         {isProcessing && (
           <div className="pointer-events-auto flex items-center gap-3 bg-[#1E2038] border border-orange-400/30 shadow-2xl rounded-2xl px-4 py-3.5">
             <span className="h-5 w-5 rounded-full border-2 border-orange-400 border-t-transparent animate-spin shrink-0" />
@@ -217,22 +339,15 @@ export function SwapButton({
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-bold text-gray-800">Swap Confirmed ✓</p>
-              <a
-                href={`https://basescan.org/tx/${txHash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-orange-400 hover:text-orange-300 font-medium mt-1 flex items-center gap-1"
-              >
+              <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noopener noreferrer"
+                className="text-xs text-orange-400 hover:text-orange-300 font-medium mt-1 flex items-center gap-1">
                 View on BaseScan
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                 </svg>
               </a>
             </div>
-            <button
-              onClick={() => { setStep(SwapStep.IDLE); setTxHash(null); }}
-              className="text-gray-600 hover:text-gray-400 shrink-0 mt-0.5"
-            >
+            <button onClick={() => { setStep(SwapStep.IDLE); setTxHash(null); }} className="text-gray-600 hover:text-gray-400 shrink-0 mt-0.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -240,7 +355,7 @@ export function SwapButton({
           </div>
         )}
 
-        {/* Error / Rejected */}
+        {/* Error */}
         {step === SwapStep.ERROR && error && (
           <div className="pointer-events-auto flex items-start gap-3 bg-[#1E2038] border border-red-500/40 shadow-2xl rounded-2xl px-4 py-3.5">
             <div className="shrink-0 w-9 h-9 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mt-0.5">
@@ -251,17 +366,11 @@ export function SwapButton({
             <div className="flex-1 min-w-0">
               <p className="text-sm font-bold text-gray-800">Transaction Failed ✗</p>
               <p className="text-xs text-gray-500 mt-0.5 break-words">{error}</p>
-              <button
-                onClick={() => { setError(null); setStep(SwapStep.IDLE); }}
-                className="text-xs text-orange-400 hover:text-orange-300 font-medium mt-1"
-              >
+              <button onClick={() => { setError(null); setStep(SwapStep.IDLE); }} className="text-xs text-orange-400 hover:text-orange-300 font-medium mt-1">
                 Try again
               </button>
             </div>
-            <button
-              onClick={() => { setError(null); setStep(SwapStep.IDLE); }}
-              className="text-gray-600 hover:text-gray-400 shrink-0 mt-0.5"
-            >
+            <button onClick={() => { setError(null); setStep(SwapStep.IDLE); }} className="text-gray-600 hover:text-gray-400 shrink-0 mt-0.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
