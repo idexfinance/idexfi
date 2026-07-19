@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { useAccount, usePublicClient } from 'wagmi';
 import { useWriteContract, useSendTransaction } from 'wagmi';
 import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
-import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
 import { NATIVE_ETH, WETH_ADDRESS, UNISWAP_V3, PANCAKESWAP_V3, RouteInfo } from '@/lib/contracts';
 import { getDeadline } from '@/lib/routing';
@@ -15,9 +14,9 @@ import WETH9ABI from '@/lib/abis/WETH9.json';
 import { saveSwap } from '@/lib/history';
 
 // ── ERC-8021 Builder Code Attribution ────────────────────────────────────────
-const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
-  codes: ['bc_ri4d72mx'],
-}) as `0x${string}`;
+// Format: 8021 + builder_code + 8021 (UTF-8 encoded as hex)
+// Produces: "8021bc_ri4d72mx8021" in calldata — readable in Basescan Input Data → UTF-8
+const BUILDER_CODE_SUFFIX: `0x${string}` = `0x${Buffer.from('8021bc_ri4d72mx8021', 'utf8').toString('hex')}`;
 
 function appendBuilderCode(data: `0x${string}`): `0x${string}` {
   return concat([data, BUILDER_CODE_SUFFIX]);
