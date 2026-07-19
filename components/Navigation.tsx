@@ -52,11 +52,23 @@ export function Navigation() {
             })}
           </div>
 
-          {/* Right side: GitHub + Connect + Hamburger */}
+          {/* Right side: X + GitHub + Connect + Hamburger */}
           <div className="flex-1 flex items-center justify-end gap-3">
+            {/* X (Twitter) */}
+            <a
+              href="https://x.com/idex_fi"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="X (Twitter)"
+              className="p-2 rounded-lg text-gray-600 hover:bg-orange-50 hover:text-orange-600 transition-all"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.737-8.835L1.254 2.25H8.08l4.253 5.622L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z" />
+              </svg>
+            </a>
             {/* GitHub */}
             <a
-              href="https://github.com/idexfinance"
+              href="https://github.com/idexfinance/idexfi"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="GitHub"
