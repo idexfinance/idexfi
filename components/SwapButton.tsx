@@ -5,14 +5,14 @@ import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
 import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
 import { calculateMinAmountOut } from '@/lib/routing';
 import { executeSwap } from '@/lib/swap-executor';
-import { NATIVE_ETH, RouteInfo, BUILDER_CODE } from '@/lib/contracts';
+import { NATIVE_ETH, RouteInfo } from '@/lib/contracts';
 import ERC20ABI from '@/lib/abis/ERC20.json';
 import { saveSwap } from '@/lib/history';
 
 // ── ERC-8021 Builder Code Attribution ────────────────────────────────────────
-// Format: "8021" + builder_code + "8021" — UTF-8 encoded
-// Attribution.toDataSuffix() from ox is NOT used — it omits the leading 8021 marker
-const BUILDER_CODE_SUFFIX: `0x${string}` = `0x${Buffer.from(`8021${BUILDER_CODE}8021`, 'utf8').toString('hex')}`;
+// "8021bc_ri4d72mx8021" UTF-8 encoded as hex — static constant, no Buffer needed
+// Verified: Buffer.from('8021bc_ri4d72mx8021','utf8').toString('hex')
+const BUILDER_CODE_SUFFIX = '0x3830323162635f7269346437326d7838303231' as `0x${string}`;
 
 function withAttribution(calldata: `0x${string}`): `0x${string}` {
   return concat([calldata, BUILDER_CODE_SUFFIX]);
