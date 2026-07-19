@@ -1,16 +1,27 @@
 'use client';
 
 import { useState } from 'react';
-import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
-import { parseUnits, maxUint256 } from 'viem';
+import { useAccount, usePublicClient, useWriteContract, useSendTransaction } from 'wagmi';
+import { encodeFunctionData, concat, parseUnits, maxUint256 } from 'viem';
+import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
-import { executeSwap } from '@/lib/swap-executor';
-import { NATIVE_ETH, RouteInfo } from '@/lib/contracts';
+import { NATIVE_ETH, WETH_ADDRESS, BUILDER_CODE, RouteInfo } from '@/lib/contracts';
+import { getDeadline } from '@/lib/routing';
 import ERC20ABI from '@/lib/abis/ERC20.json';
+import SwapRouter02ABI from '@/lib/abis/SwapRouter02.json';
+import PancakeSwapV3RouterABI from '@/lib/abis/PancakeSwapV3Router.json';
+import WETH9ABI from '@/lib/abis/WETH9.json';
 import { saveSwap } from '@/lib/history';
 
-// Builder code attribution is handled automatically at wagmi config level
-// via dataSuffix in lib/wagmi.ts — no manual concat needed here
+// ERC-8021 Builder Code Attribution
+// Suffix modül seviyesinde bir kez oluşturulur
+const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
+  codes: [BUILDER_CODE],
+}) as `0x${string}`;
+
+function appendBuilderCode(data: `0x${string}`): `0x${string}` {
+  return concat([data, BUILDER_CODE_SUFFIX]);
+}
 
 interface SwapButtonProps {
   tokenIn: string;
@@ -42,14 +53,39 @@ export function SwapButton({
 }: SwapButtonProps) {
   const { address, isConnected } = useAccount();
   const publicClient             = usePublicClient();
-  const { data: walletClient }   = useWalletClient();
+  const { writeContractAsync }   = useWriteContract();
+  const { sendTransactionAsync } = useSendTransaction();
 
   const [step, setStep]     = useState<SwapStep>(SwapStep.IDLE);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError]   = useState<string | null>(null);
 
+  // ERC-8021 uyumlu transaction gönderici
+  // encodeFunctionData → appendBuilderCode → sendTransactionAsync
+  async function writeWithBuilderCode(params: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+    value?: bigint;
+    gas?: bigint;
+  }): Promise<`0x${string}`> {
+    const data = encodeFunctionData({
+      abi: params.abi,
+      functionName: params.functionName,
+      args: params.args ?? [],
+    });
+    const dataWithBuilder = appendBuilderCode(data);
+    return sendTransactionAsync({
+      to: params.address,
+      data: dataWithBuilder,
+      value: params.value ?? 0n,
+      gas: params.gas,
+    });
+  }
+
   const handleSwap = async () => {
-    if (!publicClient || !walletClient || !address || !bestRoute) return;
+    if (!publicClient || !address || !bestRoute) return;
 
     setError(null);
     setTxHash(null);
@@ -58,8 +94,10 @@ export function SwapButton({
     try {
       const amount      = parseUnits(amountIn, decimalsIn);
       const isNativeETH = tokenIn.toLowerCase() === NATIVE_ETH.toLowerCase();
+      const deadline    = getDeadline(20);
 
-      // 1. Approve (dataSuffix in wagmi config auto-appends builder code here too)
+      // ── 1. APPROVE ──────────────────────────────────────────────────────────
+      // ERC-20 approve: attribution ekle (rehbere göre isteğe bağlı ama ekleyelim)
       if (!isNativeETH && bestRoute.dex !== 'weth-wrap') {
         const allowance = await publicClient.readContract({
           address: tokenIn as `0x${string}`,
@@ -69,10 +107,9 @@ export function SwapButton({
         }) as bigint;
 
         if (allowance < amount) {
-          setStep(SwapStep.APPROVING);
-          const approveHash = await walletClient.writeContract({
+          const approveHash = await writeWithBuilderCode({
             address: tokenIn as `0x${string}`,
-            abi: ERC20ABI,
+            abi: ERC20ABI as readonly unknown[],
             functionName: 'approve',
             args: [bestRoute.routerAddress as `0x${string}`, maxUint256],
           });
@@ -80,30 +117,153 @@ export function SwapButton({
         }
       }
 
-      // 2. Swap (dataSuffix auto-appended by wagmi config)
+      // ── 2. SWAP ─────────────────────────────────────────────────────────────
       const minAmountOut = calculateMinAmountOut(bestRoute.amountOut, slippage);
       setStep(SwapStep.SWAPPING);
 
-      const swapHash = await executeSwap(
-        walletClient,
-        bestRoute,
-        tokenIn as `0x${string}`,
-        tokenOut as `0x${string}`,
-        amount,
-        minAmountOut,
-        address
-      );
+      const isEthIn  = tokenIn.toLowerCase()  === NATIVE_ETH.toLowerCase();
+      const isEthOut = tokenOut.toLowerCase() === NATIVE_ETH.toLowerCase();
+      const actualIn  = isEthIn  ? WETH_ADDRESS : tokenIn as `0x${string}`;
+      const actualOut = isEthOut ? WETH_ADDRESS : tokenOut as `0x${string}`;
+      const router    = bestRoute.routerAddress as `0x${string}`;
 
-      setTxHash(swapHash);
+      let swapHash: `0x${string}`;
+
+      // ── WETH WRAP / UNWRAP ─────────────────────────────────────────────────
+      if (bestRoute.dex === 'weth-wrap') {
+        if (isEthIn) {
+          // ETH → WETH (deposit)
+          swapHash = await writeWithBuilderCode({
+            address: WETH_ADDRESS as `0x${string}`,
+            abi: WETH9ABI as readonly unknown[],
+            functionName: 'deposit',
+            value: amount,
+            gas: 60000n,
+          });
+        } else {
+          // WETH → ETH (withdraw)
+          swapHash = await writeWithBuilderCode({
+            address: WETH_ADDRESS as `0x${string}`,
+            abi: WETH9ABI as readonly unknown[],
+            functionName: 'withdraw',
+            args: [amount],
+            gas: 60000n,
+          });
+        }
+      }
+
+      // ── UNISWAP V3 ────────────────────────────────────────────────────────
+      else if (bestRoute.dex === 'uniswap-v3') {
+        if (isEthOut) {
+          // ETH output: multicall(exactInputSingle + unwrapWETH9)
+          // Attribution sadece dıştaki multicall'a — inner call'lara değil
+          const swapData = encodeFunctionData({
+            abi: SwapRouter02ABI,
+            functionName: 'exactInputSingle',
+            args: [{
+              tokenIn: actualIn,
+              tokenOut: actualOut,
+              fee: bestRoute.feeTier!,
+              recipient: router,
+              amountIn: amount,
+              amountOutMinimum: minAmountOut,
+              sqrtPriceLimitX96: 0n,
+            }],
+          });
+          const unwrapData = encodeFunctionData({
+            abi: SwapRouter02ABI,
+            functionName: 'unwrapWETH9',
+            args: [minAmountOut, address],
+          });
+          swapHash = await writeWithBuilderCode({
+            address: router,
+            abi: SwapRouter02ABI as readonly unknown[],
+            functionName: 'multicall',
+            args: [[swapData, unwrapData]],
+            value: isEthIn ? amount : 0n,
+          });
+        } else {
+          swapHash = await writeWithBuilderCode({
+            address: router,
+            abi: SwapRouter02ABI as readonly unknown[],
+            functionName: 'exactInputSingle',
+            args: [{
+              tokenIn: actualIn,
+              tokenOut: actualOut,
+              fee: bestRoute.feeTier!,
+              recipient: address,
+              amountIn: amount,
+              amountOutMinimum: minAmountOut,
+              sqrtPriceLimitX96: 0n,
+            }],
+            value: isEthIn ? amount : 0n,
+          });
+        }
+      }
+
+      // ── PANCAKESWAP V3 ────────────────────────────────────────────────────
+      else if (bestRoute.dex === 'pancakeswap-v3') {
+        if (isEthOut) {
+          // ETH output: multicall(exactInputSingle + unwrapWETH9)
+          // Attribution sadece dıştaki multicall'a — inner call'lara değil
+          const swapData = encodeFunctionData({
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'exactInputSingle',
+            args: [{
+              tokenIn: actualIn,
+              tokenOut: actualOut,
+              fee: bestRoute.feeTier!,
+              recipient: router,
+              deadline,
+              amountIn: amount,
+              amountOutMinimum: minAmountOut,
+              sqrtPriceLimitX96: 0n,
+            }],
+          });
+          const unwrapData = encodeFunctionData({
+            abi: PancakeSwapV3RouterABI,
+            functionName: 'unwrapWETH9',
+            args: [minAmountOut, address],
+          });
+          swapHash = await writeWithBuilderCode({
+            address: router,
+            abi: PancakeSwapV3RouterABI as readonly unknown[],
+            functionName: 'multicall',
+            args: [[swapData, unwrapData]],
+            value: isEthIn ? amount : 0n,
+          });
+        } else {
+          swapHash = await writeWithBuilderCode({
+            address: router,
+            abi: PancakeSwapV3RouterABI as readonly unknown[],
+            functionName: 'exactInputSingle',
+            args: [{
+              tokenIn: actualIn,
+              tokenOut: actualOut,
+              fee: bestRoute.feeTier!,
+              recipient: address,
+              deadline,
+              amountIn: amount,
+              amountOutMinimum: minAmountOut,
+              sqrtPriceLimitX96: 0n,
+            }],
+            value: isEthIn ? amount : 0n,
+          });
+        }
+      } else {
+        throw new Error(`Unsupported DEX: ${bestRoute.dex}`);
+      }
+
+      setTxHash(swapHash!);
       setStep(SwapStep.CONFIRMING);
 
-      // 3. Wait for confirmation
-      await publicClient.waitForTransactionReceipt({ hash: swapHash });
+      // ── 3. CONFIRMATION ───────────────────────────────────────────────────
+      await publicClient.waitForTransactionReceipt({ hash: swapHash! });
       setStep(SwapStep.SUCCESS);
 
-      // 4. Save record
+      // ── 4. HISTORY ────────────────────────────────────────────────────────
       await saveSwap(address, {
-        hash: swapHash,
+        hash: swapHash!,
         tokenIn: tokenInSymbol,
         tokenOut: tokenOutSymbol,
         amountIn,
