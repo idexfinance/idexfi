@@ -17,7 +17,7 @@
     "ox": "^1.0.2",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "viem": "^2.27.2",
+    "viem": "^2.55.4",
     "wagmi": "^2.14.16"
   },
   "devDependencies": {
