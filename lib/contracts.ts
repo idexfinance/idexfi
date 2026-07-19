@@ -31,7 +31,8 @@ export const TOKENS = {
   USDT: '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2',
 } as const;
 
-// DEX identifiers for routing
+// Builder Code — ERC-8021 attribution
+export const BUILDER_CODE = process.env.NEXT_PUBLIC_BUILDER_CODE || 'bc_ri4d72mx';
 export type DexType =
   | 'uniswap-v3'
   | 'pancakeswap-v3'
