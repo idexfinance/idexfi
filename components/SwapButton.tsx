@@ -3,17 +3,16 @@
 import { useState } from 'react';
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
 import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
-import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
 import { executeSwap } from '@/lib/swap-executor';
 import { NATIVE_ETH, RouteInfo, BUILDER_CODE } from '@/lib/contracts';
 import ERC20ABI from '@/lib/abis/ERC20.json';
 import { saveSwap } from '@/lib/history';
 
-// ── ERC-8021 suffix — module level, created once ──────────────────────────────
-const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
-  codes: [BUILDER_CODE],
-}) as `0x${string}`;
+// ── ERC-8021 Builder Code Attribution ────────────────────────────────────────
+// Format: "8021" + builder_code + "8021" — UTF-8 encoded
+// Attribution.toDataSuffix() from ox is NOT used — it omits the leading 8021 marker
+const BUILDER_CODE_SUFFIX: `0x${string}` = `0x${Buffer.from(`8021${BUILDER_CODE}8021`, 'utf8').toString('hex')}`;
 
 function withAttribution(calldata: `0x${string}`): `0x${string}` {
   return concat([calldata, BUILDER_CODE_SUFFIX]);

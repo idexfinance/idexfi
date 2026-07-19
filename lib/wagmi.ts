@@ -14,7 +14,6 @@ const baseTransport = fallback([
 
 export const config = getDefaultConfig({
   appName: 'iDEX - DEX Aggregator',
-  appUrl: 'https://idexfi.vercel.app',
   projectId,
   chains: [base],
   transports: { [base.id]: baseTransport },

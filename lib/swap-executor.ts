@@ -1,5 +1,4 @@
 import { WalletClient, encodeFunctionData, concat, Address } from 'viem';
-import { Attribution } from 'ox/erc8021';
 import { RouteInfo, NATIVE_ETH, WETH_ADDRESS, BUILDER_CODE } from './contracts';
 import { getDeadline } from './routing';
 import SwapRouter02ABI from './abis/SwapRouter02.json';
@@ -7,12 +6,12 @@ import PancakeSwapV3RouterABI from './abis/PancakeSwapV3Router.json';
 import WETH9ABI from './abis/WETH9.json';
 
 // ── ERC-8021 Builder Code Attribution ────────────────────────────────────────
-// Suffix is created once at module level — not recreated on every swap
-const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
-  codes: [BUILDER_CODE],
-}) as `0x${string}`;
+// Attribution.toDataSuffix() produces incorrect format — missing leading 8021 marker.
+// Correct ERC-8021 format: "8021" + builder_code + "8021" (UTF-8 encoded as hex)
+// Verified output: 8021bc_ri4d72mx8021 readable in Basescan Input Data → UTF-8 view
+const BUILDER_CODE_SUFFIX: `0x${string}` = `0x${Buffer.from(`8021${BUILDER_CODE}8021`, 'utf8').toString('hex')}`;
 
-// Appends builder code suffix to the outermost calldata
+// Appends builder code suffix to the outermost calldata — never to inner calls
 function withAttribution(calldata: `0x${string}`): `0x${string}` {
   return concat([calldata, BUILDER_CODE_SUFFIX]);
 }
