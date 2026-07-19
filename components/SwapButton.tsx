@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
-import { parseUnits, maxUint256, encodeFunctionData, concat } from 'viem';
+import { parseUnits, maxUint256, encodeFunctionData, concat, type Hex } from 'viem';
 import { Attribution } from 'ox/erc8021';
 import { calculateMinAmountOut } from '@/lib/routing';
 import { executeSwap } from '@/lib/swap-executor';
@@ -10,10 +10,10 @@ import { NATIVE_ETH, RouteInfo } from '@/lib/contracts';
 import ERC20ABI from '@/lib/abis/ERC20.json';
 import { saveSwap } from '@/lib/history';
 
-// Builder code suffix for approve transactions
-const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
+// Builder code suffix — same code used in swap-executor
+const BUILDER_SUFFIX = Attribution.toDataSuffix({
   codes: ['bc_ri4d72mx'],
-}) as `0x${string}`;
+}) as Hex;
 
 interface SwapButtonProps {
   tokenIn: string;
@@ -83,15 +83,18 @@ export function SwapButton({
 
         if (allowance < amount) {
           setStep(SwapStep.APPROVING);
-          const approveData = encodeFunctionData({
+          // Encode approve calldata + append builder suffix, send as raw tx
+          const approveEncoded = encodeFunctionData({
             abi: ERC20ABI,
             functionName: 'approve',
             args: [bestRoute.routerAddress as `0x${string}`, maxUint256],
           });
-          const approveDataWithBuilder = concat([approveData, BUILDER_CODE_SUFFIX]) as `0x${string}`;
+          const approveData = concat([approveEncoded, BUILDER_SUFFIX]) as Hex;
           const approveHash = await walletClient.sendTransaction({
+            account: address,
             to: tokenIn as `0x${string}`,
-            data: approveDataWithBuilder,
+            data: approveData,
+            chain: null,
           } as any);
           await publicClient.waitForTransactionReceipt({ hash: approveHash });
         }

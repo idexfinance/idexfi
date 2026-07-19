@@ -1,4 +1,4 @@
-import { WalletClient, encodeFunctionData, concat, Address } from 'viem';
+import { WalletClient, encodeFunctionData, concat, Address, Hex } from 'viem';
 import { Attribution } from 'ox/erc8021';
 import { RouteInfo, NATIVE_ETH, WETH_ADDRESS } from './contracts';
 import { getDeadline } from './routing';
@@ -7,27 +7,32 @@ import PancakeSwapV3RouterABI from './abis/PancakeSwapV3Router.json';
 import WETH9ABI from './abis/WETH9.json';
 
 // ── Builder Code Attribution (ERC-8021) ───────────────────────────────────────
-const BUILDER_CODE_SUFFIX = Attribution.toDataSuffix({
+// Generates the 8021...8021 suffix that Base indexers read for attribution
+const BUILDER_SUFFIX = Attribution.toDataSuffix({
   codes: ['bc_ri4d72mx'],
-}) as `0x${string}`;
+}) as Hex;
 
 /**
- * Appends the iDEX builder code suffix to any calldata.
- * This attributes every transaction to iDEX on Base's onchain analytics.
+ * Appends iDEX builder code suffix to calldata hex string.
+ * Result: [original calldata][8021bc_ri4d72mx8021]
  */
-function appendBuilderCode(data: `0x${string}`): `0x${string}` {
-  return concat([data, BUILDER_CODE_SUFFIX]);
+function withBuilderSuffix(data: Hex): Hex {
+  return concat([data, BUILDER_SUFFIX]) as Hex;
 }
 
 /**
- * Sends a raw transaction with builder code appended to the calldata.
- * Uses walletClient.sendTransaction instead of writeContract because
- * writeContract encodes data internally and doesn't allow custom data injection.
+ * Core helper: encodes calldata from ABI, appends builder suffix,
+ * then sends as a raw sendTransaction (NOT writeContract).
+ *
+ * Why sendTransaction and not writeContract?
+ * wagmi/viem's writeContract re-encodes data internally and strips
+ * any custom appended bytes. sendTransaction sends data as-is.
  */
 async function sendWithBuilderCode(
   walletClient: WalletClient,
+  userAddress: Address,
   params: {
-    address: `0x${string}`;
+    to: `0x${string}`;
     abi: readonly unknown[];
     functionName: string;
     args?: readonly unknown[];
@@ -35,29 +40,28 @@ async function sendWithBuilderCode(
     gas?: bigint;
   }
 ): Promise<`0x${string}`> {
-  // 1. Encode calldata from ABI
-  const data = encodeFunctionData({
+  // Step 1: encode function calldata
+  const encoded = encodeFunctionData({
     abi: params.abi,
     functionName: params.functionName,
     args: params.args ?? [],
   });
 
-  // 2. Append builder code suffix
-  const dataWithBuilder = appendBuilderCode(data);
+  // Step 2: append builder code suffix
+  const data = withBuilderSuffix(encoded);
 
-  // 3. Send as raw transaction
+  // Step 3: send raw tx — data is preserved exactly as-is
   return walletClient.sendTransaction({
-    to: params.address,
-    data: dataWithBuilder,
+    account: userAddress,
+    to: params.to,
+    data,
     value: params.value ?? 0n,
-    gas: params.gas,
+    ...(params.gas ? { gas: params.gas } : {}),
+    chain: null,
   } as any);
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
-/**
- * Execute swap on the best route with native ETH support + builder attribution
- */
 export async function executeSwap(
   walletClient: WalletClient,
   route: RouteInfo,
@@ -69,26 +73,25 @@ export async function executeSwap(
 ): Promise<`0x${string}`> {
   const deadline = getDeadline(20);
 
-  // Special case: ETH ↔ WETH wrap/unwrap
+  // ── ETH ↔ WETH wrap / unwrap ──────────────────────────────────────────────
   if (route.dex === 'weth-wrap') {
     const isWrap = tokenIn.toLowerCase() === NATIVE_ETH.toLowerCase();
-    if (isWrap) {
-      return sendWithBuilderCode(walletClient, {
-        address: WETH_ADDRESS as `0x${string}`,
-        abi: WETH9ABI,
-        functionName: 'deposit',
-        value: amountIn,
-        gas: 60000n,
-      });
-    } else {
-      return sendWithBuilderCode(walletClient, {
-        address: WETH_ADDRESS as `0x${string}`,
-        abi: WETH9ABI,
-        functionName: 'withdraw',
-        args: [amountIn],
-        gas: 60000n,
-      });
-    }
+    return sendWithBuilderCode(walletClient, userAddress, isWrap
+      ? {
+          to: WETH_ADDRESS as `0x${string}`,
+          abi: WETH9ABI,
+          functionName: 'deposit',
+          value: amountIn,
+          gas: 60000n,
+        }
+      : {
+          to: WETH_ADDRESS as `0x${string}`,
+          abi: WETH9ABI,
+          functionName: 'withdraw',
+          args: [amountIn],
+          gas: 60000n,
+        }
+    );
   }
 
   const isEthIn  = tokenIn.toLowerCase()  === NATIVE_ETH.toLowerCase();
@@ -97,36 +100,23 @@ export async function executeSwap(
   switch (route.dex) {
     case 'uniswap-v3':
       return executeV3Swap(
-        walletClient,
+        walletClient, userAddress,
         route.routerAddress as `0x${string}`,
         SwapRouter02ABI,
-        tokenIn,
-        tokenOut,
-        route.feeTier!,
-        amountIn,
-        minAmountOut,
-        userAddress,
-        deadline,
-        isEthIn,
-        isEthOut,
-        false
+        tokenIn, tokenOut, route.feeTier!,
+        amountIn, minAmountOut,
+        deadline, isEthIn, isEthOut, false
       );
 
     case 'pancakeswap-v3':
       return executeV3Swap(
-        walletClient,
+        walletClient, userAddress,
         route.routerAddress as `0x${string}`,
         PancakeSwapV3RouterABI,
-        tokenIn,
-        tokenOut,
-        route.feeTier!,
-        amountIn,
-        minAmountOut,
-        userAddress,
-        deadline,
-        isEthIn,
-        isEthOut,
-        true // PancakeSwap V3 requires deadline inside params struct
+        tokenIn, tokenOut, route.feeTier!,
+        amountIn, minAmountOut,
+        deadline, isEthIn, isEthOut,
+        true // PancakeSwap V3 needs deadline inside params struct
       );
 
     default:
@@ -134,12 +124,10 @@ export async function executeSwap(
   }
 }
 
-/**
- * Execute Uniswap V3 / PancakeSwap V3 exactInputSingle with builder attribution.
- * isPancake=true adds deadline inside the params struct (PancakeSwap V3 requirement).
- */
+// ── V3 swap (Uniswap & PancakeSwap) ──────────────────────────────────────────
 async function executeV3Swap(
   walletClient: WalletClient,
+  userAddress: Address,
   routerAddress: `0x${string}`,
   abi: typeof SwapRouter02ABI,
   tokenIn: Address,
@@ -147,11 +135,10 @@ async function executeV3Swap(
   fee: number,
   amountIn: bigint,
   amountOutMinimum: bigint,
-  recipient: Address,
   deadline: bigint,
   isEthIn: boolean,
   isEthOut: boolean,
-  isPancake: boolean = false
+  isPancake: boolean
 ): Promise<`0x${string}`> {
   const actualTokenIn  = isEthIn  ? WETH_ADDRESS : tokenIn;
   const actualTokenOut = isEthOut ? WETH_ADDRESS : tokenOut;
@@ -161,23 +148,22 @@ async function executeV3Swap(
       ? { tokenIn: actualTokenIn, tokenOut: actualTokenOut, fee, recipient: overrideRecipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n }
       : { tokenIn: actualTokenIn, tokenOut: actualTokenOut, fee, recipient: overrideRecipient, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n };
 
-  // ETH output: swap to WETH then unwrap via multicall
+  // ETH output path: swap → WETH, then unwrap in same multicall tx
   if (isEthOut) {
+    // Inner calldatas are NOT builder-suffixed — only the outer multicall gets it
     const swapCalldata = encodeFunctionData({
       abi,
       functionName: 'exactInputSingle',
       args: [buildParams(routerAddress)],
     });
-
     const unwrapCalldata = encodeFunctionData({
       abi,
       functionName: 'unwrapWETH9',
-      args: [amountOutMinimum, recipient],
+      args: [amountOutMinimum, userAddress],
     });
 
-    // Builder code goes on the outer multicall calldata
-    return sendWithBuilderCode(walletClient, {
-      address: routerAddress,
+    return sendWithBuilderCode(walletClient, userAddress, {
+      to: routerAddress,
       abi,
       functionName: 'multicall',
       args: [[swapCalldata, unwrapCalldata]],
@@ -185,12 +171,12 @@ async function executeV3Swap(
     });
   }
 
-  // Normal single-hop swap
-  return sendWithBuilderCode(walletClient, {
-    address: routerAddress,
+  // Standard single-hop swap
+  return sendWithBuilderCode(walletClient, userAddress, {
+    to: routerAddress,
     abi,
     functionName: 'exactInputSingle',
-    args: [buildParams(recipient)],
+    args: [buildParams(userAddress)],
     value: isEthIn ? amountIn : 0n,
   });
 }
