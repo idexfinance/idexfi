@@ -25,7 +25,11 @@ export const metadata: Metadata = {
     description: 'Find the best swap rates across Uniswap V3 and PancakeSwap V3 on Base network',
   },
   icons: {
-    icon: '/favicon.ico',
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/idex logo .png', type: 'image/png' },
+    ],
+    apple: '/idex logo .png',
   },
   other: {
     'base:app_id': '6a5cb44361706cb4b64c8898',
